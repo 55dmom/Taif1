@@ -1,0 +1,531 @@
+name: Build iOS IPA (unsigned)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Create Flutter iOS project
+        run: flutter create --platforms=ios --project-name alam_al_shemagh apps/mobile
+
+      - name: Write app source files
+        run: |
+          cat > apps/mobile/pubspec.yaml << 'EOF'
+          name: alam_al_shemagh
+          description: متجر عالم الشماغ
+          publish_to: 'none'
+          version: 1.0.0+1
+          
+          environment:
+            sdk: '>=3.0.0 <4.0.0'
+          
+          dependencies:
+            flutter:
+              sdk: flutter
+            supabase_flutter: ^2.8.4
+            shared_preferences: ^2.3.0
+          
+          dev_dependencies:
+            flutter_test:
+              sdk: flutter
+            flutter_lints: ^4.0.0
+          
+          flutter:
+            uses-material-design: true
+          EOF
+          
+          cat > apps/mobile/analysis_options.yaml << 'EOF'
+          include: package:flutter_lints/flutter.yaml
+          linter:
+            rules:
+              prefer_const_constructors: true
+              avoid_print: false
+          EOF
+          
+          mkdir -p apps/mobile/lib/{models,data,services,screens}
+          
+          cat > apps/mobile/lib/main.dart << 'EOF'
+          import 'package:flutter/material.dart';
+          import 'package:supabase_flutter/supabase_flutter.dart';
+          import 'app.dart';
+          
+          const bool kUseSupabase = false;
+          const String kSupabaseUrl = 'https://YOUR_PROJECT.supabase.co';
+          const String kSupabaseAnonKey = 'YOUR_ANON_KEY';
+          
+          Future<void> main() async {
+            WidgetsFlutterBinding.ensureInitialized();
+            if (kUseSupabase) {
+              try {
+                await Supabase.initialize(url: kSupabaseUrl, anonKey: kSupabaseAnonKey);
+              } catch (e) {
+                debugPrint('Supabase init failed: $e');
+              }
+            }
+            runApp(const AlamAlShemaghApp());
+          }
+          EOF
+          
+          cat > apps/mobile/lib/app.dart << 'EOF'
+          import 'package:flutter/material.dart';
+          import 'screens/store_shell.dart';
+          
+          class AlamAlShemaghApp extends StatelessWidget {
+            const AlamAlShemaghApp({super.key});
+          
+            @override
+            Widget build(BuildContext context) {
+              return MaterialApp(
+                title: 'عالم الشماغ',
+                debugShowCheckedModeBanner: false,
+                theme: ThemeData(
+                  colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF8B0000)),
+                  useMaterial3: true,
+                ),
+                locale: const Locale('ar'),
+                supportedLocales: const [Locale('ar'), Locale('en')],
+                builder: (context, child) => Directionality(
+                  textDirection: TextDirection.rtl,
+                  child: child ?? const SizedBox.shrink(),
+                ),
+                home: const StoreShell(),
+              );
+            }
+          }
+          EOF
+          
+          cat > apps/mobile/lib/models/product.dart << 'EOF'
+          class Product {
+            final String id;
+            final String name;
+            final String description;
+            final double price;
+            final String? imagePath;
+          
+            const Product({
+              required this.id,
+              required this.name,
+              required this.description,
+              required this.price,
+              this.imagePath,
+            });
+          
+            factory Product.fromJson(Map<String, dynamic> json) => Product(
+                  id: json['id'].toString(),
+                  name: json['name'] as String? ?? '',
+                  description: json['description'] as String? ?? '',
+                  price: (json['price'] as num?)?.toDouble() ?? 0,
+                  imagePath: json['image_path'] as String?,
+                );
+          }
+          EOF
+          
+          cat > apps/mobile/lib/data/demo_products.dart << 'EOF'
+          import '../models/product.dart';
+          
+          const List<Product> demoProducts = [
+            Product(id: '1', name: 'شماغ أحمر كلاسيكي', description: 'شماغ قطني فاخر، مقاس 58', price: 120),
+            Product(id: '2', name: 'شماغ أبيض فاخر', description: 'شماغ أبيض ناعم، مناسب للمناسبات', price: 150),
+            Product(id: '3', name: 'عقال أسود', description: 'عقال أسود مطرز بجودة عالية', price: 80),
+            Product(id: '4', name: 'طاقية قطنية', description: 'طاقية قطنية مريحة تحت الشماغ', price: 35),
+            Product(id: '5', name: 'شماغ رمادي حديث', description: 'تصميم عصري بلون رمادي أنيق', price: 140),
+            Product(id: '6', name: 'شماغ شتوي صوف', description: 'شماغ صوف دافئ للشتاء', price: 180),
+          ];
+          EOF
+          
+          cat > apps/mobile/lib/services/cart_service.dart << 'EOF'
+          import 'dart:convert';
+          import 'package:shared_preferences/shared_preferences.dart';
+          
+          class CartItem {
+            final String productId;
+            final String name;
+            final double price;
+            int quantity;
+          
+            CartItem({
+              required this.productId,
+              required this.name,
+              required this.price,
+              this.quantity = 1,
+            });
+          
+            Map<String, dynamic> toJson() => {
+                  'productId': productId,
+                  'name': name,
+                  'price': price,
+                  'quantity': quantity,
+                };
+          
+            factory CartItem.fromJson(Map<String, dynamic> j) => CartItem(
+                  productId: j['productId'] as String,
+                  name: j['name'] as String,
+                  price: (j['price'] as num).toDouble(),
+                  quantity: j['quantity'] as int,
+                );
+          }
+          
+          class CartService {
+            static const _key = 'cart_items_v1';
+            final List<CartItem> items = [];
+          
+            Future<void> load() async {
+              try {
+                final prefs = await SharedPreferences.getInstance();
+                final raw = prefs.getString(_key);
+                if (raw != null) {
+                  final list = jsonDecode(raw) as List<dynamic>;
+                  items
+                    ..clear()
+                    ..addAll(list.map((e) => CartItem.fromJson(e as Map<String, dynamic>)));
+                }
+              } catch (_) {
+                items.clear();
+              }
+            }
+          
+            Future<void> save() async {
+              try {
+                final prefs = await SharedPreferences.getInstance();
+                await prefs.setString(_key, jsonEncode(items.map((e) => e.toJson()).toList()));
+              } catch (_) {}
+            }
+          
+            void add(CartItem item) {
+              final i = items.indexWhere((e) => e.productId == item.productId);
+              if (i >= 0) {
+                items[i].quantity += item.quantity;
+              } else {
+                items.add(item);
+              }
+              save();
+            }
+          
+            void remove(String productId) {
+              items.removeWhere((e) => e.productId == productId);
+              save();
+            }
+          
+            void clear() {
+              items.clear();
+              save();
+            }
+          
+            double get total => items.fold(0, (s, e) => s + e.price * e.quantity);
+            int get count => items.fold(0, (s, e) => s + e.quantity);
+          }
+          EOF
+          
+          cat > apps/mobile/lib/services/catalog_service.dart << 'EOF'
+          import 'package:supabase_flutter/supabase_flutter.dart';
+          import '../models/product.dart';
+          import '../data/demo_products.dart';
+          import '../main.dart' show kUseSupabase;
+          
+          class CatalogService {
+            Future<List<Product>> fetchProducts() async {
+              if (!kUseSupabase) return demoProducts;
+              try {
+                final data = await Supabase.instance.client
+                    .from('products')
+                    .select()
+                    .eq('is_active', true)
+                    .order('created_at', ascending: false);
+                return (data as List)
+                    .map((e) => Product.fromJson(e as Map<String, dynamic>))
+                    .toList();
+              } catch (_) {
+                return demoProducts;
+              }
+            }
+          }
+          EOF
+          
+          cat > apps/mobile/lib/services/order_service.dart << 'EOF'
+          import 'package:supabase_flutter/supabase_flutter.dart';
+          import '../main.dart' show kUseSupabase;
+          
+          class OrderService {
+            Future<void> createOrder({
+              required List<Map<String, dynamic>> items,
+              required double total,
+            }) async {
+              if (!kUseSupabase) {
+                await Future.delayed(const Duration(milliseconds: 400));
+                return;
+              }
+              final client = Supabase.instance.client;
+              final uid = client.auth.currentUser?.id;
+              if (uid == null) throw Exception('يجب تسجيل الدخول');
+              final order = await client.from('orders').insert({
+                'customer_id': uid,
+                'total': total,
+                'status': 'pending',
+              }).select().single();
+              final orderId = order['id'];
+              final rows = items.map((e) => {...e, 'order_id': orderId}).toList();
+              await client.from('order_items').insert(rows);
+            }
+          }
+          EOF
+          
+          cat > apps/mobile/lib/screens/store_shell.dart << 'EOF'
+          import 'package:flutter/material.dart';
+          import '../models/product.dart';
+          import '../services/catalog_service.dart';
+          import '../services/cart_service.dart';
+          import '../services/order_service.dart';
+          
+          class StoreShell extends StatefulWidget {
+            const StoreShell({super.key});
+            @override
+            State<StoreShell> createState() => _StoreShellState();
+          }
+          
+          class _StoreShellState extends State<StoreShell> {
+            int _index = 0;
+            final CartService _cart = CartService();
+            final CatalogService _catalog = CatalogService();
+            List<Product> _products = [];
+            bool _loading = true;
+          
+            @override
+            void initState() {
+              super.initState();
+              _bootstrap();
+            }
+          
+            Future<void> _bootstrap() async {
+              await _cart.load();
+              final p = await _catalog.fetchProducts();
+              if (!mounted) return;
+              setState(() {
+                _products = p;
+                _loading = false;
+              });
+            }
+          
+            @override
+            Widget build(BuildContext context) {
+              final titles = ['الرئيسية', 'المفضلة', 'السلة', 'حسابي'];
+              return Scaffold(
+                appBar: AppBar(title: Text(titles[_index]), centerTitle: true),
+                body: _loading
+                    ? const Center(child: CircularProgressIndicator())
+                    : IndexedStack(
+                        index: _index,
+                        children: [
+                          _HomeTab(products: _products, cart: _cart, onCartChanged: () => setState(() {})),
+                          const _CenterText('لا توجد مفضلات بعد'),
+                          _CartTab(cart: _cart, onChanged: () => setState(() {})),
+                          const _CenterText('حسابي'),
+                        ],
+                      ),
+                bottomNavigationBar: NavigationBar(
+                  selectedIndex: _index,
+                  onDestinationSelected: (i) => setState(() => _index = i),
+                  destinations: [
+                    const NavigationDestination(icon: Icon(Icons.home), label: 'الرئيسية'),
+                    const NavigationDestination(icon: Icon(Icons.favorite), label: 'المفضلة'),
+                    NavigationDestination(
+                      icon: Badge(
+                        isLabelVisible: _cart.count > 0,
+                        label: Text('${_cart.count}'),
+                        child: const Icon(Icons.shopping_cart),
+                      ),
+                      label: 'السلة',
+                    ),
+                    const NavigationDestination(icon: Icon(Icons.person), label: 'حسابي'),
+                  ],
+                ),
+              );
+            }
+          }
+          
+          class _CenterText extends StatelessWidget {
+            final String text;
+            const _CenterText(this.text);
+            @override
+            Widget build(BuildContext context) =>
+                Center(child: Text(text, style: const TextStyle(fontSize: 18)));
+          }
+          
+          class _HomeTab extends StatelessWidget {
+            final List<Product> products;
+            final CartService cart;
+            final VoidCallback onCartChanged;
+            const _HomeTab({required this.products, required this.cart, required this.onCartChanged});
+          
+            @override
+            Widget build(BuildContext context) {
+              if (products.isEmpty) return const _CenterText('لا توجد منتجات');
+              return ListView.builder(
+                padding: const EdgeInsets.all(12),
+                itemCount: products.length,
+                itemBuilder: (context, i) {
+                  final p = products[i];
+                  return Card(
+                    margin: const EdgeInsets.symmetric(vertical: 6),
+                    child: ListTile(
+                      leading: CircleAvatar(
+                        backgroundColor: Colors.red.shade100,
+                        child: const Icon(Icons.shopping_bag, color: Colors.red),
+                      ),
+                      title: Text(p.name, style: const TextStyle(fontWeight: FontWeight.bold)),
+                      subtitle: Text(p.description),
+                      trailing: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: [
+                          Text('${p.price.toStringAsFixed(0)} ر.س',
+                              style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.red)),
+                          const SizedBox(height: 4),
+                          IconButton(
+                            icon: const Icon(Icons.add_shopping_cart, size: 20),
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(),
+                            onPressed: () {
+                              cart.add(CartItem(productId: p.id, name: p.name, price: p.price));
+                              onCartChanged();
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(content: Text('أضيف: ${p.name}'), duration: const Duration(seconds: 1)),
+                              );
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              );
+            }
+          }
+          
+          class _CartTab extends StatefulWidget {
+            final CartService cart;
+            final VoidCallback onChanged;
+            const _CartTab({required this.cart, required this.onChanged});
+            @override
+            State<_CartTab> createState() => _CartTabState();
+          }
+          
+          class _CartTabState extends State<_CartTab> {
+            bool _sending = false;
+          
+            Future<void> _checkout() async {
+              if (widget.cart.items.isEmpty) return;
+              setState(() => _sending = true);
+              try {
+                await OrderService().createOrder(
+                  items: widget.cart.items
+                      .map((e) => {'product_id': e.productId, 'quantity': e.quantity, 'price': e.price})
+                      .toList(),
+                  total: widget.cart.total,
+                );
+                widget.cart.clear();
+                if (!mounted) return;
+                setState(() {});
+                widget.onChanged();
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('تم إرسال الطلب بنجاح ✅')),
+                );
+              } catch (e) {
+                if (!mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('فشل الطلب: $e')),
+                );
+              } finally {
+                if (mounted) setState(() => _sending = false);
+              }
+            }
+          
+            @override
+            Widget build(BuildContext context) {
+              final items = widget.cart.items;
+              if (items.isEmpty) return const _CenterText('السلة فارغة');
+              return Column(
+                children: [
+                  Expanded(
+                    child: ListView.builder(
+                      itemCount: items.length,
+                      itemBuilder: (context, i) {
+                        final it = items[i];
+                        return ListTile(
+                          title: Text(it.name),
+                          subtitle: Text('${it.price.toStringAsFixed(0)} ر.س × ${it.quantity}'),
+                          trailing: IconButton(
+                            icon: const Icon(Icons.delete, color: Colors.red),
+                            onPressed: () {
+                              widget.cart.remove(it.productId);
+                              setState(() {});
+                              widget.onChanged();
+                            },
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Text(
+                          'المجموع: ${widget.cart.total.toStringAsFixed(0)} ر.س',
+                          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                          textAlign: TextAlign.center,
+                        ),
+                        const SizedBox(height: 12),
+                        FilledButton(
+                          onPressed: _sending ? null : _checkout,
+                          child: _sending
+                              ? const SizedBox(
+                                  height: 20, width: 20,
+                                  child: CircularProgressIndicator(strokeWidth: 2))
+                              : const Text('تأكيد الطلب'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              );
+            }
+          }
+          EOF
+          rm -f apps/mobile/test/widget_test.dart
+
+      - name: Install dependencies
+        run: flutter pub get
+        working-directory: apps/mobile
+
+      - name: Build iOS (no codesign)
+        run: flutter build ios --release --no-codesign
+        working-directory: apps/mobile
+
+      - name: Package IPA
+        run: |
+          cd apps/mobile/build/ios/iphoneos
+          mkdir -p Payload
+          cp -R Runner.app Payload/
+          zip -qr alam_al_shemagh.ipa Payload
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ipa-v1.0.${{ github.run_number }}
+          name: عالم الشماغ - iOS (build ${{ github.run_number }})
+          body: ملف IPA غير موقّع. ثبّته عبر AltStore أو Sideloadly.
+          files: apps/mobile/build/ios/iphoneos/alam_al_shemagh.ipa
